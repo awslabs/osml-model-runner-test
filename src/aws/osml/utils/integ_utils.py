@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from math import isclose
 from secrets import token_hex
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -325,17 +326,41 @@ def feature_equal(expected: geojson.Feature, actual: geojson.Feature) -> bool:
     actual_pixel_coords = actual.get("properties", {}).get("detection", {}).get("pixelCoordinates")
     expected_pixel_coords = expected.get("properties", {}).get("detection", {}).get("pixelCoordinates")
 
-    return (
-        expected.type == actual.type
-        and expected.geometry == actual.geometry
-        and expected_pixel_coords == actual_pixel_coords
-        and expected.properties.get("inferenceMetadata") is not None
-        and source_metadata_equal(expected.properties.get("sourceMetadata"), actual.properties.get("sourceMetadata"))
-        and expected.properties.get("featureClasses") == actual.properties.get("featureClasses")
-        and expected.properties.get("imageGeometry") == actual.properties.get("imageGeometry")
-        and expected.properties.get("center_longitude") == actual.properties.get("center_longitude")
-        and expected.properties.get("center_latitude") == actual.properties.get("center_latitude")
-    )
+    geojson_checks = [
+        ("Feature type matches", expected.type == actual.type),
+        ("Geometry matches", expected.geometry == actual.geometry),
+        ("Pixel coordinates match", expected_pixel_coords == actual_pixel_coords),
+        ("Inference metadata exists", expected.properties.get("inferenceMetadata") is not None),
+        (
+            "Source metadata matches",
+            source_metadata_equal(expected.properties.get("sourceMetadata"), actual.properties.get("sourceMetadata")),
+        ),
+        (
+            "Feature detection class matches",
+            expected.properties.get("featureClasses") == actual.properties.get("featureClasses"),
+        ),
+        ("Image geometry matches", expected.properties.get("imageGeometry") == actual.properties.get("imageGeometry")),
+        (
+            "Center longitude matches",
+            isclose(
+                expected.properties.get("center_longitude"), actual.properties.get("center_longitude"), abs_tol=10 ** (-8)
+            ),
+        ),
+        (
+            "Center latitude matches",
+            isclose(
+                expected.properties.get("center_latitude"), actual.properties.get("center_latitude"), abs_tol=10 ** (-8)
+            ),
+        ),
+    ]
+    failed_checks = []
+    for check, result in geojson_checks:
+        if not result:
+            failed_checks.append(check)
+    if len(failed_checks) > 0:
+        logging.info(f"Failed feature equality checks: {', '.join(failed_checks)}")
+        return False
+    return True
 
 
 def source_metadata_equal(expected: List, actual: List) -> bool:
