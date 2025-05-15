@@ -17,16 +17,21 @@ from .osml_config import OSMLConfig
 
 
 def run_model_on_image(
-    sqs_client: boto3.resource, endpoint: str, endpoint_type: str, kinesis_client: Optional[boto3.resource]
+    sqs_client: boto3.resource,
+    endpoint: str,
+    endpoint_type: str,
+    kinesis_client: Optional[boto3.resource],
+    model_variant: Optional[str] = None,
 ) -> Tuple[str, str, Dict[str, Any], Optional[Dict[str, Any]]]:
     """
     The workflow to build an image request for a specific model endpoint and then place it
     on the corresponding SQS queue for ModelRunner to pick up and process. Once the image
     has been completed, return the associated image_id and image_request object for analysis.
 
-    :param endpoint_type: The type of endpoint you want to build the image_request for SM/HTTP
     :param sqs_client: SQS client fixture passed in
     :param endpoint: endpoint you wish to run your image against
+    :param endpoint_type: The type of endpoint you want to build the image_request for SM/HTTP
+    :param model_variant: The SageMaker model variant name to send an image processing job to
     :param kinesis_client: Optional kinesis client fixture passed in
 
     :return: Tuple[str, str, Dict[str, Any], Dict[str, Any]] = the generated image_id, job_id, image_request,
@@ -35,7 +40,9 @@ def run_model_on_image(
     image_url = OSMLConfig.TARGET_IMAGE  # get image_url
 
     # Build an image processing request from the test environment
-    image_processing_request = build_image_processing_request(endpoint, endpoint_type, image_url)
+    image_processing_request = build_image_processing_request(
+        endpoint, endpoint_type, image_url, model_variant=model_variant
+    )
 
     # Get the current Kinesis shard iterator to listen to for results since our start time
     shard_iter = get_kinesis_shard(kinesis_client)
@@ -420,7 +427,9 @@ def feature_collections_equal(expected: List[geojson.Feature], actual: List[geoj
     return True
 
 
-def build_image_processing_request(endpoint: str, endpoint_type: str, image_url: str) -> Dict[str, Any]:
+def build_image_processing_request(
+    endpoint: str, endpoint_type: str, image_url: str, model_variant: Optional[str]
+) -> Dict[str, Any]:
     """
     Build an image_processing_request meant to be placed on the corresponding ModelRunner SQS queue.
     The image request is configured from test environment.
@@ -430,6 +439,7 @@ def build_image_processing_request(endpoint: str, endpoint_type: str, image_url:
     :param endpoint: Model endpoint that you want to build the image_request for
     :param endpoint_type: The type of endpoint you want to build the image_request for SM/HTTP
     :param image_url: URL to the image you want to process
+    :param model_variant: The SageMaker model variant name to send an image processing job to
 
     :return: Dictionary representation of the image request
     """
@@ -445,7 +455,10 @@ def build_image_processing_request(endpoint: str, endpoint_type: str, image_url:
 
     logging.info(f"Starting ModelRunner image job in {OSMLConfig.REGION}")
     logging.info(f"Image: {image_url}")
-    logging.info(f"Model: {endpoint}, Type:{endpoint_type}")
+    if model_variant:
+        logging.info(f"Type: {endpoint_type}, Model: {endpoint}, Variant: {model_variant}")
+    else:
+        logging.info(f"Type: {endpoint_type}, Model: {endpoint}")
 
     job_id = token_hex(16)
     job_name = f"test-{job_id}"
@@ -467,6 +480,8 @@ def build_image_processing_request(endpoint: str, endpoint_type: str, image_url:
         "postProcessing": json.loads(OSMLConfig.POST_PROCESSING),
         "regionOfInterest": OSMLConfig.REGION_OF_INTEREST,
     }
+    if model_variant:
+        image_processing_request["imageProcessorParameters"] = {"TargetVariant": model_variant}
 
     return image_processing_request
 
@@ -499,45 +514,54 @@ def count_features(image_id: str, ddb_client: boto3.resource) -> int:
     return total_features
 
 
-def validate_expected_feature_count(feature_count: int) -> None:
+def validate_expected_feature_count(feature_count: int, model_variant: Optional[str]) -> None:
     """
-    Validate the number of features created match expected values
+    Used for flood model: Validate the number of features created match expected values
 
     :param feature_count: Number of features found for an image
+    :param model_variant: The SageMaker model variant the image processing job was sent to
 
     :return: None
     """
-    expected_feature_count = get_expected_image_feature_count(OSMLConfig.TARGET_IMAGE)
+    expected_feature_counts = get_expected_image_feature_count(OSMLConfig.TARGET_IMAGE, variant=model_variant)
     test_succeeded = False
-    if feature_count == expected_feature_count:
+    if feature_count in expected_feature_counts:
         logging.info(f"Found expected features for image {OSMLConfig.TARGET_IMAGE}.")
         test_succeeded = True
     else:
-        logging.info(f"Found {feature_count} features for image but expected {expected_feature_count}!")
+        expected_feature_counts_str = " | ".join(map(str, expected_feature_counts))
+        logging.info(f"Found {feature_count} features for image but expected {expected_feature_counts_str}!")
 
     assert test_succeeded
 
 
-def get_expected_image_feature_count(image: str) -> int:
+def get_expected_image_feature_count(image: str, variant: Optional[str]) -> List[int]:
     """
-    Get the number of expected features that are created for each image,
+    Used for flood model: Get the number of expected features that are created for each image,
     since these are random.
     We want to just count the features in the table,
     not match them against any known results.
 
-    :return: Features we expect for a given image using the flood model
+    :return: List of feature counts we expect for a given image
     """
     # Set the expected
     if "large" in image:
-        return 112200
+        expected = 112200
     elif "tile" in image:
-        return 2
+        expected = 2
     elif "sicd-capella-chip" in image or "sicd-umbra-chip" in image:
-        return 100
+        expected = 100
     elif "sicd-interferometric" in image:
-        return 15300
+        expected = 15300
     else:
         raise Exception(f"Could not determine expected features for image: {image}")
+    if variant:
+        if variant == "flood-50":
+            return [int(expected / 2)]
+        else:
+            return [expected]
+    else:
+        return [expected, int(expected / 2)]
 
 
 def query_items(ddb_table: boto3.resource, hash_key: str, hash_value: str, is_feature_count: bool) -> List[Dict[str, Any]]:
