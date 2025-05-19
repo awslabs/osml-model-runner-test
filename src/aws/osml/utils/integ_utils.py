@@ -22,6 +22,7 @@ def run_model_on_image(
     endpoint_type: str,
     kinesis_client: Optional[boto3.resource],
     model_variant: Optional[str] = None,
+    target_container: Optional[str] = None,
 ) -> Tuple[str, str, Dict[str, Any], Optional[Dict[str, Any]]]:
     """
     The workflow to build an image request for a specific model endpoint and then place it
@@ -41,7 +42,7 @@ def run_model_on_image(
 
     # Build an image processing request from the test environment
     image_processing_request = build_image_processing_request(
-        endpoint, endpoint_type, image_url, model_variant=model_variant
+        endpoint, endpoint_type, image_url, model_variant=model_variant, target_container=target_container
     )
 
     # Get the current Kinesis shard iterator to listen to for results since our start time
@@ -175,6 +176,7 @@ def validate_features_match(
     shard_iter: Dict[str, Any],
     s3_client: boto3.client = None,
     kinesis_client: boto3.client = None,
+    result_file: str = None,
 ) -> None:
     """
     Compares known standard results (features) against the ones generated from the tests.
@@ -195,8 +197,8 @@ def validate_features_match(
 
     if OSMLConfig.REGION_OF_INTEREST is not None:
         use_roi = ".roi"
-
-    result_file = f"./src/data/{OSMLConfig.TARGET_MODEL}.{OSMLConfig.TARGET_IMAGE.split('/')[-1]}{use_roi}.geojson"
+    if result_file is None:
+        result_file = f"./src/data/{OSMLConfig.TARGET_MODEL}.{OSMLConfig.TARGET_IMAGE.split('/')[-1]}{use_roi}.geojson"
     logging.info(f"Validating against {result_file}")
     with open(result_file, "r") as geojson_file:
         expected_features = geojson.load(geojson_file)["features"]
@@ -428,7 +430,7 @@ def feature_collections_equal(expected: List[geojson.Feature], actual: List[geoj
 
 
 def build_image_processing_request(
-    endpoint: str, endpoint_type: str, image_url: str, model_variant: Optional[str]
+    endpoint: str, endpoint_type: str, image_url: str, model_variant: Optional[str], target_container: Optional[str]
 ) -> Dict[str, Any]:
     """
     Build an image_processing_request meant to be placed on the corresponding ModelRunner SQS queue.
@@ -457,6 +459,8 @@ def build_image_processing_request(
     logging.info(f"Image: {image_url}")
     if model_variant:
         logging.info(f"Type: {endpoint_type}, Model: {endpoint}, Variant: {model_variant}")
+    elif target_container:
+        logging.info(f"Type: {endpoint_type}, Model: {endpoint}, Container: {target_container}")
     else:
         logging.info(f"Type: {endpoint_type}, Model: {endpoint}")
 
@@ -482,6 +486,9 @@ def build_image_processing_request(
     }
     if model_variant:
         image_processing_request["imageProcessorParameters"] = {"TargetVariant": model_variant}
+
+    if target_container:
+        image_processing_request["imageProcessorParameters"] = {"TargetContainerHostname": target_container}
 
     return image_processing_request
 

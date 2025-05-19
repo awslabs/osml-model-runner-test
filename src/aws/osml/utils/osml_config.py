@@ -25,6 +25,7 @@ class OSMLConfig:
     SM_CENTERPOINT_MODEL: str = os.getenv("SM_CENTER_POINT_MODEL", "centerpoint")
     SM_FLOOD_MODEL: str = os.getenv("SM_FLOOD_MODEL", "flood")
     SM_AIRCRAFT_MODEL: str = os.getenv("SM_AIRCRAFT_MODEL", "aircraft")
+    SM_MULTI_CONTAINER_ENDPOINT: str = os.getenv("SM_MULTI_CONTAINER_ENDPOINT", "multi-container")
 
     # HTTP model config
     HTTP_CENTERPOINT_MODEL_URL: str = os.getenv("HTTP_CENTER_POINT_MODEL_URL", None)
