@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import time
 from math import isclose
 from secrets import token_hex
@@ -59,8 +60,12 @@ def run_model_on_image(
     # image processing request. See AWSOversightMLModelRunner src/aws_oversightml_model_runner/model_runner_api.py
     image_id = job_id + ":" + image_processing_request["imageUrls"][0]
 
+    # Get timeout from environment variable or use default
+    timeout_minutes = int(os.environ.get("TEST_TIMEOUT_MINUTES", "30"))
+    logging.info(f"Using timeout of {timeout_minutes} minutes for image processing")
+
     # Monitor the job status queue for updates
-    monitor_job_status(sqs_client, image_id)
+    monitor_job_status(sqs_client, image_id, timeout_minutes)
 
     # Return the image id and generated request
     return image_id, job_id, image_processing_request, shard_iter
@@ -98,23 +103,26 @@ def queue_image_processing_job(sqs_client: boto3.resource, image_processing_requ
         assert False
 
 
-def monitor_job_status(sqs_client: boto3.resource, image_id: str) -> None:
+def monitor_job_status(sqs_client: boto3.resource, image_id: str, timeout_minutes: int = 30) -> None:
     """
     Monitors the status of the image request on the corresponding SQS queue and returns
     once the image request associated with the given image_id has completed.
 
     :param sqs_client: The sqs client fixture passed in
     :param image_id: Image_id associated with the image request to monitor
+    :param timeout_minutes: Maximum time to wait for completion in minutes (default: 30)
     :return: None
     """
     done = False
-    # Let it wait 15 minutes before failing
-    max_retries = 300
+    # Convert timeout to retries (5 second intervals)
+    max_retries = timeout_minutes * 12  # 12 retries per minute (5 second intervals)
     retry_interval = 5
     queue = sqs_client.get_queue_by_name(
         QueueName=OSMLConfig.SQS_IMAGE_STATUS_QUEUE, QueueOwnerAWSAccountId=OSMLConfig.ACCOUNT
     )
-    logging.info("Listening to SQS ImageStatusQueue for progress updates...")
+    logging.info(f"Listening to SQS ImageStatusQueue for progress updates... (timeout: {timeout_minutes} minutes)")
+
+    start_time = time.time()
     while not done and max_retries > 0:
         try:
             messages = queue.receive_messages()
@@ -123,12 +131,15 @@ def monitor_job_status(sqs_client: boto3.resource, image_id: str) -> None:
                 message_image_id = message_attributes.get("image_id", {}).get("Value")
                 message_image_status = message_attributes.get("status", {}).get("Value")
                 if message_image_status == "IN_PROGRESS" and message_image_id == image_id:
-                    logging.info("\tIN_PROGRESS message found! Waiting for SUCCESS message...")
+                    elapsed = int(time.time() - start_time)
+                    logging.info(f"\tIN_PROGRESS message found! Waiting for SUCCESS message... (elapsed: {elapsed}s)")
                 elif message_image_status == "SUCCESS" and message_image_id == image_id:
                     processing_duration = message_attributes.get("processing_duration", {}).get("Value")
                     assert float(processing_duration) > 0
                     done = True
-                    logging.info(f"\tSUCCESS message found!  Image took {processing_duration} seconds to process")
+                    elapsed = int(time.time() - start_time)
+                    logging.info(f"\tSUCCESS message found! Image took {processing_duration} seconds to process.")
+                    logging.info(f"Total wait: {elapsed}s")
                 elif (
                     message_image_status == "FAILED" or message_image_status == "PARTIAL"
                 ) and message_image_id == image_id:
@@ -138,24 +149,35 @@ def monitor_job_status(sqs_client: boto3.resource, image_id: str) -> None:
                         failure_message = str(message)
                     except Exception:
                         pass
-                    logging.info("Failed to process image. {}".format(failure_message))
+                    logging.error(f"Failed to process image {image_id}. Status: {message_image_status}. {failure_message}")
                     assert False
                 else:
-                    logging.info("\t...")
+                    # Only log every 30 seconds to reduce noise
+                    if max_retries % 6 == 0:  # 6 retries = 30 seconds
+                        elapsed = int(time.time() - start_time)
+                        logging.info(f"\tWaiting for {image_id}... (elapsed: {elapsed}s, retries left: {max_retries})")
         except ClientError as err:
-            logging.warning(err)
+            logging.warning(f"ClientError in monitor_job_status: {err}")
+            # Don't raise immediately, continue retrying
+        except Exception as err:
+            logging.error(f"Unexpected error in monitor_job_status: {err}")
             raise err
+
         max_retries -= 1
         time.sleep(retry_interval)
 
     if not done:
-        logging.info(f"Maximum retries reached waiting for {image_id}")
+        elapsed = int(time.time() - start_time)
+        logging.error(f"Maximum retries reached waiting for {image_id}.")
+        logging.error(f"Total time waited: {elapsed} seconds ({timeout_minutes} minutes)")
+        raise TimeoutError(f"Image processing timed out after {timeout_minutes} minutes for image {image_id}")
+
     assert done
 
 
 def get_kinesis_shard(kinesis_client: boto3.client) -> Dict[str, Any]:
     """
-    Get uniquely identified sequence of data records in a kinesis stream
+    Get a uniquely identified sequence of data records in a kinesis stream
 
     :param kinesis_client: boto3.client = the kinesis client fixture passed in
 
