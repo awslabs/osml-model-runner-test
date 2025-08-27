@@ -1,0 +1,44 @@
+sm_multi-container.test_sm_multi-container_model
+================================================
+
+.. py:module:: sm_multi-container.test_sm_multi-container_model
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   sm_multi-container.test_sm_multi-container_model.logger
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   sm_multi-container.test_sm_multi-container_model.test_model_runner_multi_container_center_point_model
+   sm_multi-container.test_sm_multi-container_model.test_model_runner_multi_container_aircraft_model
+
+
+Module Contents
+---------------
+
+.. py:data:: logger
+
+.. py:function:: test_model_runner_multi_container_center_point_model() -> None
+
+   Run the test using the SageMaker multi container endpoint (centerpoint container) and validate the
+   number of features and region requests
+
+   :return: None
+
+
+.. py:function:: test_model_runner_multi_container_aircraft_model() -> None
+
+   Run the test using the SageMaker multi container endpoint (aircraft container) and validate the
+   number of features and region requests
+
+   :return: None
+
+

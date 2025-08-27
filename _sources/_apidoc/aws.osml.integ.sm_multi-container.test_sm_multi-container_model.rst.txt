@@ -1,0 +1,7 @@
+aws.osml.integ.sm\_multi\-container.test\_sm\_multi\-container\_model module
+============================================================================
+
+.. automodule:: aws.osml.integ.sm_multi-container.test_sm_multi-container_model
+   :members:
+   :undoc-members:
+   :show-inheritance:
