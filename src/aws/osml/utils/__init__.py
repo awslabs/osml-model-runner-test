@@ -6,10 +6,12 @@
 
 from .clients import cw_client, ddb_client, elb_client, kinesis_client, s3_client, sm_client, sqs_client
 from .integ_utils import (
+    analyze_failure_model_results,
     build_image_processing_request,
     count_features,
     count_region_request_items,
     queue_image_processing_job,
+    run_failure_model_on_image,
     run_model_on_image,
     validate_expected_feature_count,
     validate_expected_region_request_items,
