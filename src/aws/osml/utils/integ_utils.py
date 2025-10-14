@@ -701,3 +701,176 @@ def get_expected_region_request_count(image: str) -> int:
         return expected_count
     else:
         raise Exception(f"Could not determine expected region request for image: {image}")
+
+
+# Failure Model Logic
+def run_failure_model_on_image(
+    sqs_client: boto3.resource,
+    endpoint: str,
+    endpoint_type: str,
+    kinesis_client: Optional[boto3.resource],
+    model_variant: Optional[str] = None,
+    target_container: Optional[str] = None,
+) -> Tuple[str, str, Dict[str, Any], Optional[Dict[str, Any]]]:
+    """
+    The workflow to build an image request for the failure model endpoint and then place it
+    on the corresponding SQS queue for ModelRunner to pick up and process. Once the image
+    has been completed, return the associated image_id and image_request object for analysis.
+
+    :param sqs_client: SQS client fixture passed in
+    :param endpoint: endpoint you wish to run your image against
+    :param endpoint_type: The type of endpoint you want to build the image_request for SM/HTTP
+    :param model_variant: The SageMaker model variant name to send an image processing job to
+    :param kinesis_client: Optional kinesis client fixture passed in
+
+    :return: Tuple[str, str, Dict[str, Any], Dict[str, Any]] = the generated image_id, job_id, image_request,
+             and kinesis shard.
+    """
+    image_url = OSMLConfig.TARGET_IMAGE
+
+    image_processing_request = build_image_processing_request(
+        endpoint, endpoint_type, image_url, model_variant=model_variant, target_container=target_container
+    )
+
+    shard_iter = get_kinesis_shard(kinesis_client)
+    logging.info(f"Image processing request: {image_processing_request}")
+    queue_image_processing_job(sqs_client, image_processing_request)
+
+    job_id = image_processing_request["jobId"]
+    image_id = job_id + ":" + image_processing_request["imageUrls"][0]
+
+    timeout_minutes = int(os.environ.get("TEST_TIMEOUT_MINUTES", "30"))
+    logging.info(f"Using timeout of {timeout_minutes} minutes for image processing")
+
+    # Use custom monitor that expects PARTIAL/FAILED
+    monitor_failure_model_job_status(sqs_client, image_id, timeout_minutes)
+
+    return image_id, job_id, image_processing_request, shard_iter
+
+
+def monitor_failure_model_job_status(sqs_client: boto3.resource, image_id: str, timeout_minutes: int = 30):
+    """
+    Monitor failure model job and return detailed tile-level results. This workflow expects
+    PARTIAL/FAILED status for colored tiles and
+
+    :param sqs_client: The sqs client fixture passed in
+    :param image_id: Image_id associated with the image request to monitor
+    :param timeout_minutes: Maximum time to wait for completion in minutes (default: 30)
+    :return: None
+    """
+    done = False
+    max_retries = timeout_minutes * 12
+    retry_interval = 5
+
+    queue = sqs_client.get_queue_by_name(
+        QueueName=OSMLConfig.SQS_IMAGE_STATUS_QUEUE, QueueOwnerAWSAccountId=OSMLConfig.ACCOUNT
+    )
+    logging.info(f"Listening to SQS ImageStatusQueue for progress updates... (timeout: {timeout_minutes} minutes)")
+
+    start_time = time.time()
+    while not done and max_retries > 0:
+        try:
+            messages = queue.receive_messages()
+            for message in messages:
+                message_attributes = json.loads(message.body).get("MessageAttributes", {})
+                message_image_id = message_attributes.get("image_id", {}).get("Value")
+                message_image_status = message_attributes.get("status", {}).get("Value")
+
+                if message_image_id == image_id:
+                    if message_image_status == "IN_PROGRESS":
+                        elapsed = int(time.time() - start_time)
+                        logging.info(f"Job still in progress... (elapsed: {elapsed} seconds)")
+                    elif message_image_status in ["PARTIAL", "FAILED", "SUCCESS"]:
+                        logging.info(f"Job completed with status: {message_image_status}")
+                        processing_duration = message_attributes.get("processing_duration", {}).get("Value", "0")
+                        done = True
+                        elapsed = int(time.time() - start_time)
+                        logging.info(
+                            f"\t{message_image_status} message found! "
+                            f"Processing took {processing_duration}s (total wait: {elapsed}s)"
+                        )
+                        break
+                    else:
+                        # Log waitin message every 30 seconds
+                        if max_retries % 6 == 0:
+                            elapsed = int(time.time() - start_time)
+                            logging.info(f"Waiting for {image_id}.... (elapsed: {elapsed}s, retries left: {max_retries})")
+        except Exception as err:
+            logging.warning(f"Error monitoring job: {err}")
+
+        max_retries -= 1
+        time.sleep(retry_interval)
+
+    if not done:
+        raise TimeoutError(f"Job timed out after {timeout_minutes} minutes")
+
+
+def analyze_failure_model_results(image_id: str, ddb_client: boto3.resource) -> Dict[str, Any]:
+    """
+    Analyze failure model results by querying DynamoDB region request table.
+
+    :param image_id: Image Id string in the region request table
+    :param ddb_client: dynamodb client fixture
+    :return: Dictionary containing quantity of tiles successfully processed, failed, end result,
+        and the cloudwatch error details for the failed tiles
+    """
+    ddb_table = ddb_client.Table(OSMLConfig.DDB_REGION_REQUEST_TABLE)
+    logging.info(f"Querying DDB Region Request Table for image_id: {image_id} to build fail result dictionary")
+    # Query all region requests for this image
+    items = query_items(ddb_table, "image_id", image_id, False)
+
+    # failure model paths have 1 item in ddb to query
+    region_status = items[0].get("region_status", "UKNOWN")
+    logging.info(f"Region Status in table: {region_status}")
+
+    succeeded_tiles = int(items[0].get("succeeded_tile_count", 0))
+    failed_tiles = int(items[0].get("failed_tile_count", 0))
+
+    error_counts = get_cloudwatch_errors(image_id)
+    return {
+        "successful_tiles": succeeded_tiles,
+        "failed_tiles": failed_tiles,
+        "total_tiles": succeeded_tiles + failed_tiles,
+        "region_status": region_status,
+        "error_details": error_counts,
+    }
+
+
+def get_cloudwatch_errors(image_id: str) -> Dict[str, int]:
+    """
+    Query Cloudwatch logs for specific error patterns for known failure scenarios
+
+    :param image_id: Image Id string in the region request table
+    :return: Dictionary containing the count of each error type
+    """
+
+    cw_client = boto3.client("logs", region_name=OSMLConfig.REGION)
+
+    # Time Range for the job (-1hr to now)
+    end_time = int(time.time() * 1000)
+    start_time = end_time - (60 * 60 * 1000)
+    job_id = image_id.split(":")[0]
+
+    # Query for log streams
+    response = cw_client.filter_log_events(
+        logGroupName="/aws/OSML/MRService",
+        startTime=start_time,
+        endTime=end_time,
+        filterPattern=f"{job_id} ERROR",
+    )
+    # Initialize error counts
+    error_counts = {"red_500": 0, "blue_408": 0, "purple_rfc7946": 0, "green_malformed_json": 0}
+
+    # Process log events
+    for event in response["events"]:
+        message = event["message"]
+        if "500" and "Unable to process request" in message:
+            error_counts["red_500"] += 1
+        elif "408" and "Request timeout" in message:
+            error_counts["blue_408"] += 1
+        elif "Unable to decode response from model" in message:
+            error_counts["purple_rfc7946"] += 1
+        elif "JSONDecodeError" in message:
+            error_counts["green_malformed_json"] += 1
+
+    return error_counts

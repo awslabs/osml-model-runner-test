@@ -96,6 +96,29 @@ To execute the integration test, exclude `--skip_integ` from the command line in
 | tile_jpeg                   | aircraft    |
 | tile_png                    | aircraft    |
 
+### Failure Model Testing
+
+The failure model provides controlled error simulation for testing error resilience and partial job completion handling. It triggers different failure behaviors based on the dominant color of image tiles:
+
+| Color  | Behavior | HTTP Status | Description |
+|--------|----------|-------------|-------------|
+| Red    | Server Error | 500 | Returns "Unable to process request" |
+| Blue   | Timeout | 408 | Simulates processing timeout (5s delay) |
+| Green  | Malformed JSON | 200 | Returns invalid JSON response |
+| Purple | Schema Violation | 200 | Returns JSON with invalid GeoJSON schema |
+| Other  | Normal Processing | 200 | Returns standard detection results |
+
+**Example:**
+
+```bash
+python3 bin/process_image.py --image failure_model_checker_tile --model failure --tile_overlap 0
+```
+This test validates:
+- Handling partial job completion (PARTIAL/FAIL status)
+- Proper error logging and retry mechanisms
+- Tile-level success/failure tracking in DynamoDB
+
+
 ### Running LoadTest
 
 You can run the load test against your dev account and be able to determine the cost and the performance. **Please advise** it can potentially rack up your AWS bills!
