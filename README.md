@@ -27,7 +27,7 @@ First, ensure you have installed the following tools locally
 1. Clone `osml-model-runner-test` package into your desktop
 
 ```sh
-git clone https://github.com/aws-solutions-library-samples/osml-model-runner-test.git
+git clone https://github.com/awslabs/osml-model-runner-test.git
 ```
 
 1. Run `tox` to create a virtual environment
